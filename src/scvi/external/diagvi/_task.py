@@ -112,6 +112,17 @@ class DiagTrainingPlan(TrainingPlan):
         Learning rate.
     loss_annealing
         Whether to anneal loss parameters during training.
+    n_epochs_kl_warmup
+        Number of epochs to scale weight on KL divergence from ``min_kl_weight``
+        to ``max_kl_weight``. Overrides ``n_steps_kl_warmup`` if both are set.
+    n_steps_kl_warmup
+        Number of training steps to scale weight on KL divergence from
+        ``min_kl_weight`` to ``max_kl_weight``. Only used if ``n_epochs_kl_warmup``
+        is None.
+    max_kl_weight
+        Maximum weight on KL divergence during training.
+    min_kl_weight
+        Minimum weight on KL divergence during training.
     log_train
         Whether to log individual train loss components.
     log_val
@@ -138,12 +149,24 @@ class DiagTrainingPlan(TrainingPlan):
         reach_scale: float = 3.0,
         lr: float = 1e-3,
         loss_annealing: bool = False,
+        n_epochs_kl_warmup: int | None = 40,
+        n_steps_kl_warmup: int | None = None,
+        max_kl_weight: float = 1.0,
+        min_kl_weight: float = 0.0,
         log_train: bool = True,
         log_val: bool = False,
         *args,
         **kwargs,
     ) -> None:
-        super().__init__(module, *args, **kwargs)
+        super().__init__(
+            module,
+            n_epochs_kl_warmup=n_epochs_kl_warmup,
+            n_steps_kl_warmup=n_steps_kl_warmup,
+            max_kl_weight=max_kl_weight,
+            min_kl_weight=min_kl_weight,
+            *args,
+            **kwargs,
+        )
 
         # Loss weights
         self.lam_graph = lam_graph
@@ -201,8 +224,9 @@ class DiagTrainingPlan(TrainingPlan):
             batch_size = tensors[REGISTRY_KEYS.X_KEY].shape[0]
 
             # Update loss kwargs for current modality
+            # kl_weight is dynamically computed by the parent TrainingPlan for KL annealing
             self.loss_kwargs.update(
-                {"lam_kl": self.lam_kl, "lam_data": self.lam_data, "mode": name}
+                {"lam_kl": self.lam_kl, "lam_data": self.lam_data, "kl_weight": self.kl_weight, "mode": name}
             )
 
             # Calculate reconstruction, KL, and classification losses
@@ -460,6 +484,8 @@ class DiagTrainingPlan(TrainingPlan):
             on_epoch=True,
             batch_size=total_batch_size,
         )
+        self.log("kl_weight", self.kl_weight, on_step=True, on_epoch=False)
+        self.log("current_blur", self.current_blur, on_step=True, on_epoch=False)
 
         # Return embeddings along with loss for callbacks (detached to avoid graph issues)
         embeddings = {

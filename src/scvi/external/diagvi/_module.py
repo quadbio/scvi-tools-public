@@ -441,6 +441,7 @@ class DIAGVAE(BaseModuleClass):
         generative_outputs: dict[str, torch.Tensor],
         lam_kl: torch.Tensor | float,
         lam_data: torch.Tensor | float,
+        kl_weight: torch.Tensor | float = 1.0,
         mode: str | None = None,
     ) -> LossOutput:
         """Compute the loss for a batch.
@@ -457,6 +458,9 @@ class DIAGVAE(BaseModuleClass):
             Weight for the KL divergence term.
         lam_data
             Weight for the reconstruction loss term.
+        kl_weight
+            Dynamic weight for KL divergence term used for KL annealing.
+            The effective KL weight is ``kl_weight * lam_kl``.
         mode
             Name of the modality.
 
@@ -483,8 +487,11 @@ class DIAGVAE(BaseModuleClass):
             ).sum(dim=-1)
         kl_local_norm = torch.sum(kl_div) / (n_obs * n_var)
         
+        # Effective KL weight combines dynamic annealing weight with user-specified scale
+        effective_kl_weight = kl_weight * lam_kl
+        
         # Total loss
-        loss = lam_data * reconstruction_loss_norm + lam_kl * kl_local_norm
+        loss = lam_data * reconstruction_loss_norm + effective_kl_weight * kl_local_norm
 
         # Graph inference
         mu_all = inference_outputs["mu_all"]

@@ -180,6 +180,8 @@ class DIAGVI(BaseModelClass, VAEMixin):
         accelerator: str = "auto",
         devices: int | list[int] | str = "auto",
         shuffle_set_split: bool = True,
+        n_epochs_kl_warmup: int | None = 400,
+        n_steps_kl_warmup: int | None = None,
         datasplitter_kwargs: dict | None = None,
         plan_kwargs: dict | None = None,
         **kwargs,
@@ -196,6 +198,13 @@ class DIAGVI(BaseModelClass, VAEMixin):
             Proportion of data to use for training (rest for validation).
         shuffle_set_split
             Whether to shuffle data before splitting into train/validation.
+        n_epochs_kl_warmup
+            Number of epochs to scale weight on KL divergence from 0 to 1.
+            Overrides ``n_steps_kl_warmup`` if both are set. Set to ``None``
+            to disable KL warmup.
+        n_steps_kl_warmup
+            Number of training steps to scale weight on KL divergence from 0 to 1.
+            Only used if ``n_epochs_kl_warmup`` is ``None``.
         datasplitter_kwargs
             Additional keyword arguments for the DataSplitter and DataLoaders.
         plan_kwargs
@@ -270,6 +279,8 @@ class DIAGVI(BaseModelClass, VAEMixin):
         
         # Initialize and run training plan
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
+        plan_kwargs["n_epochs_kl_warmup"] = n_epochs_kl_warmup
+        plan_kwargs["n_steps_kl_warmup"] = n_steps_kl_warmup
         self._training_plan = self._training_plan_cls(
             self.module,
             **plan_kwargs,
