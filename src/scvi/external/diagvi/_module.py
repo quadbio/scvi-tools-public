@@ -439,8 +439,7 @@ class DIAGVAE(BaseModuleClass):
         tensors: dict[str, torch.Tensor],
         inference_outputs: dict[str, torch.Tensor],
         generative_outputs: dict[str, torch.Tensor],
-        lam_kl: torch.Tensor | float,
-        lam_data: torch.Tensor | float,
+        kl_weight: float = 1.0,
         mode: str | None = None,
     ) -> LossOutput:
         """Compute the loss for a batch.
@@ -453,10 +452,8 @@ class DIAGVAE(BaseModuleClass):
             Outputs from the inference step.
         generative_outputs
             Outputs from the generative step.
-        lam_kl
+        kl_weight
             Weight for the KL divergence term.
-        lam_data
-            Weight for the reconstruction loss term.
         mode
             Name of the modality.
 
@@ -465,12 +462,10 @@ class DIAGVAE(BaseModuleClass):
         Object containing loss components and metrics.
         """
         x = tensors[REGISTRY_KEYS.X_KEY]
-        n_obs = x.shape[0]
-        n_var = x.shape[1]
 
         # Data nll calculation (reconstruction loss)
         reconst_loss = -generative_outputs[MODULE_KEYS.PX_KEY].log_prob(x).sum(-1)
-        reconstruction_loss_norm = torch.mean(reconst_loss)
+        reconst_loss_mean = torch.mean(reconst_loss)
         
         # KL divergence calculation
         if self.use_gmm_prior[mode]:
@@ -481,10 +476,10 @@ class DIAGVAE(BaseModuleClass):
             kl_div = kl_divergence(
                 inference_outputs[MODULE_KEYS.QZ_KEY], generative_outputs[MODULE_KEYS.PZ_KEY]
             ).sum(dim=-1)
-        kl_local_norm = torch.sum(kl_div) / (n_obs * n_var)
+        kl_div_mean = torch.mean(kl_div)
         
         # Total loss
-        loss = lam_data * reconstruction_loss_norm + lam_kl * kl_local_norm
+        loss = reconst_loss_mean + kl_weight * kl_div_mean
 
         # Graph inference
         mu_all = inference_outputs["mu_all"]
@@ -506,8 +501,8 @@ class DIAGVAE(BaseModuleClass):
 
         return LossOutput(
             loss=loss,
-            reconstruction_loss=reconst_loss,
-            kl_local=kl_local_norm,
+            reconstruction_loss=reconst_loss_mean,
+            kl_local=kl_div_mean,
             extra_metrics={
                 "z": inference_outputs[MODULE_KEYS.Z_KEY],
                 "mu_all": mu_all,

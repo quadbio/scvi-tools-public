@@ -175,11 +175,14 @@ class DIAGVI(BaseModelClass, VAEMixin):
     def train(
         self,
         max_epochs: int | None = None,
+        lr: float = 1e-3,
         batch_size: int = 2048,
         train_size: float = 0.9,
         accelerator: str = "auto",
         devices: int | list[int] | str = "auto",
         shuffle_set_split: bool = True,
+        n_steps_kl_warmup: int | None = None,
+        n_epochs_kl_warmup: int | None = 20,
         datasplitter_kwargs: dict | None = None,
         plan_kwargs: dict | None = None,
         **kwargs,
@@ -190,12 +193,21 @@ class DIAGVI(BaseModelClass, VAEMixin):
         ----------
         max_epochs
             Maximum number of training epochs. If None, a heuristic is used.
+        lr
+            Learning rate for optimization.
         %(param_accelerator)s
         %(param_devices)s
         train_size
             Proportion of data to use for training (rest for validation).
         shuffle_set_split
             Whether to shuffle data before splitting into train/validation.
+        n_steps_kl_warmup
+            Number of training steps (minibatches) to scale weight on KL divergences from 0 to 1.
+            Only activated when `n_epochs_kl_warmup` is set to None. If `None`, defaults
+            to `floor(0.75 * adata.n_obs)`.
+        n_epochs_kl_warmup
+            Number of epochs to scale weight on KL divergences from 0 to 1.
+            Overrides `n_steps_kl_warmup` when both are not `None`.
         datasplitter_kwargs
             Additional keyword arguments for the DataSplitter and DataLoaders.
         plan_kwargs
@@ -269,6 +281,15 @@ class DIAGVI(BaseModelClass, VAEMixin):
         val_dl = TrainDL(val_dls)
         
         # Initialize and run training plan
+        update_dict = {
+            "lr": lr,
+            "n_epochs_kl_warmup": n_epochs_kl_warmup,
+            "n_steps_kl_warmup": n_steps_kl_warmup,
+        }
+        if plan_kwargs is not None:
+            plan_kwargs.update(update_dict)
+        else:
+            plan_kwargs = update_dict
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         self._training_plan = self._training_plan_cls(
             self.module,

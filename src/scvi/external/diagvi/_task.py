@@ -84,12 +84,19 @@ class DiagTrainingPlan(TrainingPlan):
     ----------
     module
         DIAGVAE module to train.
+    n_steps_kl_warmup
+        Number of training steps (minibatches) to scale weight on KL divergences from
+        `min_kl_weight` to `max_kl_weight`. Only activated when `n_epochs_kl_warmup` is
+        set to None.
+    n_epochs_kl_warmup
+        Number of epochs to scale weight on KL divergences from `min_kl_weight` to
+        `max_kl_weight`. Overrides `n_steps_kl_warmup` when both are not `None`.
+    max_kl_weight
+        Maximum scaling factor on KL divergence during training.
+    min_kl_weight
+        Minimum scaling factor on KL divergence during training.
     lam_graph
         Weight for the graph reconstruction loss.
-    lam_kl
-        Weight for the KL divergence loss.
-    lam_data
-        Weight for the data reconstruction loss.
     lam_sinkhorn
         Weight for the Sinkhorn (optimal transport) loss.
     lam_class
@@ -125,9 +132,11 @@ class DiagTrainingPlan(TrainingPlan):
     def __init__(
         self,
         module: torch.nn.Module,
+        n_steps_kl_warmup: int = None,
+        n_epochs_kl_warmup: int = 20,
+        max_kl_weight: float = 1.0,
+        min_kl_weight: float = 0.0,
         lam_graph: float = 1.0,
-        lam_kl: float = 1.0,
-        lam_data: float = 0.1,
         lam_sinkhorn: float = 1.0,
         lam_class: float = 1.0,
         sinkhorn_p: int = 2,
@@ -143,12 +152,17 @@ class DiagTrainingPlan(TrainingPlan):
         *args,
         **kwargs,
     ) -> None:
-        super().__init__(module, *args, **kwargs)
+        super().__init__(
+            module,
+            n_epochs_kl_warmup=n_epochs_kl_warmup,
+            n_steps_kl_warmup=n_steps_kl_warmup,
+            max_kl_weight=max_kl_weight,
+            min_kl_weight=min_kl_weight,
+            *args,
+            **kwargs)
 
         # Loss weights
         self.lam_graph = lam_graph
-        self.lam_kl = lam_kl
-        self.lam_data = lam_data
         self.lam_sinkhorn = lam_sinkhorn
         self.lam_class = lam_class
 
@@ -201,9 +215,11 @@ class DiagTrainingPlan(TrainingPlan):
             batch_size = tensors[REGISTRY_KEYS.X_KEY].shape[0]
 
             # Update loss kwargs for current modality
-            self.loss_kwargs.update(
-                {"lam_kl": self.lam_kl, "lam_data": self.lam_data, "mode": name}
-            )
+            if "kl_weight" in self.loss_kwargs:
+                kl_weight = self.kl_weight
+                self.loss_kwargs.update({"kl_weight": kl_weight})
+                self.log("kl_weight", kl_weight, on_step=True, on_epoch=False)
+            self.loss_kwargs.update({"mode": name})
 
             # Calculate reconstruction, KL, and classification losses
             _, _, loss_output = self.forward(
@@ -226,10 +242,11 @@ class DiagTrainingPlan(TrainingPlan):
 
             # Only training step
             if log_prefix == "train_":
-                reconstruction_loss = torch.mean(
-                    loss_output.reconstruction_loss["reconstruction_loss"]
-                )
-                self.log(f"nll_{name}", reconstruction_loss, batch_size=batch_size, on_epoch=True)
+                self.log(
+                    f"nll_{name}",
+                    loss_output.reconstruction_loss["reconstruction_loss"],
+                    batch_size=batch_size,
+                    on_epoch=True)
                 self.log(
                     f"kl_{name}",
                     loss_output.kl_local["kl_local"],
