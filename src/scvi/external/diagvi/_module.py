@@ -501,8 +501,8 @@ class DIAGVAE(BaseModuleClass):
 
         return LossOutput(
             loss=loss,
-            reconstruction_loss=reconst_loss_mean,
-            kl_local=kl_div_mean,
+            reconstruction_loss=reconst_loss,
+            kl_local=kl_div,
             extra_metrics={
                 "z": inference_outputs[MODULE_KEYS.Z_KEY],
                 "mu_all": mu_all,

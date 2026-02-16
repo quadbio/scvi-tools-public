@@ -244,12 +244,12 @@ class DiagTrainingPlan(TrainingPlan):
             if log_prefix == "train_":
                 self.log(
                     f"nll_{name}",
-                    loss_output.reconstruction_loss["reconstruction_loss"],
+                    torch.mean(loss_output.reconstruction_loss["reconstruction_loss"]),
                     batch_size=batch_size,
                     on_epoch=True)
                 self.log(
                     f"kl_{name}",
-                    loss_output.kl_local["kl_local"],
+                    torch.mean(loss_output.kl_local["kl_local"]),
                     batch_size=batch_size,
                     on_epoch=True,
                 )
