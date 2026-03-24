@@ -93,6 +93,9 @@ class DIAGVAE(BaseModuleClass):
         Dropout rate for encoders.
     """
 
+    # Track the device the graph was last moved to
+    _graph_device: torch.device | None = None
+
     def __init__(
         self,
         n_inputs: dict[str, int],
@@ -265,12 +268,49 @@ class DIAGVAE(BaseModuleClass):
             "v": inference_outputs["v"],
         }
 
+    def compute_graph_embeddings(
+        self, device: torch.device, deterministic: bool = False
+    ) -> dict[str, torch.Tensor]:
+        """Compute graph encoder embeddings once per batch.
+
+        This method should be called once at the start of each training step,
+        and the result passed to inference() to avoid redundant computation.
+
+        Parameters
+        ----------
+        device
+            Device to compute embeddings on.
+        deterministic
+            If True, return the mean instead of sampling.
+
+        Returns
+        -------
+        Dictionary containing v_all, mu_all, logvar_all tensors.
+        """
+        # Move graph to device only once
+        if self._graph_device != device:
+            self.guidance_graph = self.guidance_graph.to(device)
+            self._graph_device = device
+
+        # Compute graph embeddings
+        v_all, mu_all, logvar_all = self.graph_encoder(self.guidance_graph.edge_index)
+
+        if deterministic:
+            v_all = mu_all
+
+        return {
+            "v_all": v_all,
+            "mu_all": mu_all,
+            "logvar_all": logvar_all,
+        }
+
     @auto_move_data
     def inference(
         self,
         x: torch.Tensor,
         mode: str | None = None,
         deterministic: bool = False,
+        graph_embeddings: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Run the inference (encoder and graph) step for a given modality.
 
@@ -280,6 +320,11 @@ class DIAGVAE(BaseModuleClass):
             Input data tensor.
         mode
             Name of the modality.
+        deterministic
+            If True, use deterministic inference.
+        graph_embeddings
+            Optional pre-computed graph embeddings from compute_graph_embeddings().
+            If provided, skips redundant graph encoder computation.
 
         Returns
         -------
@@ -287,15 +332,25 @@ class DIAGVAE(BaseModuleClass):
         graph embeddings.
         """
         library = torch.log(x.sum(1)).unsqueeze(1)
-        graph = self.guidance_graph
         device = x.device
-        graph = graph.to(device)
+        graph = self.guidance_graph
 
-        # Graph inference
-        v_all, mu_all, logvar_all = self.graph_encoder(graph.edge_index)
+        # Use cached graph embeddings if provided, otherwise compute
+        if graph_embeddings is not None:
+            v_all = graph_embeddings["v_all"]
+            mu_all = graph_embeddings["mu_all"]
+            logvar_all = graph_embeddings["logvar_all"]
+        else:
+            # Fallback: compute graph embeddings (for backward compatibility)
+            if self._graph_device != device:
+                self.guidance_graph = self.guidance_graph.to(device)
+                self._graph_device = device
+                graph = self.guidance_graph
 
-        if deterministic:
-            v_all = mu_all
+            v_all, mu_all, logvar_all = self.graph_encoder(graph.edge_index)
+
+            if deterministic:
+                v_all = mu_all
 
         v = v_all[getattr(graph, f"{mode}_indices")]
         other_mode = [m for m in self.input_names if m != mode][0]

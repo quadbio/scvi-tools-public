@@ -201,6 +201,11 @@ class DiagTrainingPlan(TrainingPlan):
         """
         loss_outputs = []
 
+        # Compute graph embeddings ONCE for all modalities (avoid redundant GCN forward passes)
+        first_modality_tensors = next(iter(batch.values()))
+        device = first_modality_tensors[REGISTRY_KEYS.X_KEY].device
+        graph_embeddings = self.module.compute_graph_embeddings(device)
+
         for name, tensors in batch.items():
             batch_size = tensors[REGISTRY_KEYS.X_KEY].shape[0]
 
@@ -210,10 +215,11 @@ class DiagTrainingPlan(TrainingPlan):
             )
 
             # Calculate reconstruction, KL, and classification losses
+            # Pass cached graph embeddings to avoid recomputation
             _, _, loss_output = self.forward(
                 tensors,
                 loss_kwargs=self.loss_kwargs,
-                inference_kwargs={"mode": name},
+                inference_kwargs={"mode": name, "graph_embeddings": graph_embeddings},
                 generative_kwargs={"mode": name},
             )
 
