@@ -569,6 +569,17 @@ class DIAGVI(BaseModelClass, VAEMixin):
             rna_adata, atac_adata, gene_region, promoter_len, extend_range, rna_key, atac_key
         )
 
+    def propagate_highly_variable(
+        rna_adata: AnnData,
+        atac_adata: AnnData,
+        mapping_df: pd.DataFrame,
+        rna_key: str = "rna",
+        atac_key: str = "atac",
+    ) -> None:
+        from ._utils import propagate_highly_variable
+
+        return propagate_highly_variable(rna_adata, atac_adata, mapping_df, rna_key, atac_key)
+
     @staticmethod
     @dependencies("torch_geometric")
     def construct_custom_guidance_graph(

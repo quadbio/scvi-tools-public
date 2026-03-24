@@ -243,13 +243,6 @@ def construct_peak_gene_mapping(
     ------
     ValueError
         If required var columns are missing from either AnnData.
-
-    Examples
-    --------
-    >>> mapping_df = construct_peak_gene_mapping(rna_adata, atac_adata)
-    >>> graph = _construct_guidance_graph(
-    ...     {"rna": rna_adata, "atac": atac_adata}, mapping_df=mapping_df
-    ... )
     """
     # Auto-detect gene_region based on strand availability
     has_strand = "strand" in rna_adata.var.columns
@@ -392,6 +385,74 @@ def construct_peak_gene_mapping(
         f"mean={peaks_per_gene.mean():.1f}, median={peaks_per_gene.median():.1f}."
     )
     return result
+
+
+def propagate_highly_variable(
+    rna_adata: AnnData,
+    atac_adata: AnnData,
+    mapping_df: pd.DataFrame,
+    rna_key: str = "rna",
+    atac_key: str = "atac",
+    subset: bool = True,
+) -> None:
+    """Propagate highly_variable status from RNA genes to linked ATAC peaks.
+
+    Marks peaks in atac_adata as highly variable if they are linked to at least
+    one highly variable gene in rna_adata, based on the peak-gene mapping.
+    Optionally subsets both adatas to only highly variable features.
+
+    Parameters
+    ----------
+    rna_adata
+        RNA AnnData with 'highly_variable' column in var.
+    atac_adata
+        ATAC AnnData to annotate (modified in place).
+    mapping_df
+        Gene-peak mapping DataFrame from construct_peak_gene_mapping().
+    rna_key
+        Column name for RNA features in mapping_df.
+    atac_key
+        Column name for ATAC features in mapping_df.
+    subset
+        If True (default), subset both adatas in place to only contain
+        highly variable genes/peaks.
+
+    Notes
+    -----
+    Modifies atac_adata.var in place by adding 'highly_variable' column.
+    A peak is marked as highly variable if it is linked to at least one
+    highly variable gene. If subset=True, both adatas are subsetted in place
+    to only contain highly variable features.
+    """
+    if "highly_variable" not in rna_adata.var.columns:
+        logger.warning("No 'highly_variable' column in rna_adata.var. Skipping.")
+        return
+
+    # Get set of highly variable gene names
+    hvg_mask = rna_adata.var["highly_variable"].astype(bool)
+    hvg_names = set(rna_adata.var_names[hvg_mask])
+
+    # Find peaks linked to HVGs
+    hvg_peaks = mapping_df.loc[mapping_df[rna_key].isin(hvg_names), atac_key].unique()
+
+    # Mark peaks in atac_adata
+    atac_adata.var["highly_variable"] = atac_adata.var_names.isin(hvg_peaks)
+
+    n_hvg = len(hvg_names)
+    n_hvp = atac_adata.var["highly_variable"].sum()
+    logger.info(f"Propagated highly_variable: {n_hvg} HVGs -> {n_hvp} peaks marked.")
+
+    # Subset both adatas to highly variable features in place
+    if subset:
+        # Subset RNA to HVGs
+        rna_hvg_mask = rna_adata.var["highly_variable"].values
+        rna_adata._inplace_subset_var(rna_hvg_mask)
+
+        # Subset ATAC to HV peaks
+        atac_hvp_mask = atac_adata.var["highly_variable"].values
+        atac_adata._inplace_subset_var(atac_hvp_mask)
+
+        logger.info(f"Subsetted adatas in place: RNA ({n_hvg} HVGs), ATAC ({n_hvp} HV peaks).")
 
 
 @dependencies("torch_geometric")
