@@ -3,5 +3,12 @@
 from ._model import DIAGVI
 from ._module import DIAGVAE
 from ._task import DiagTrainingPlan
+from ._utils import add_gene_coords_from_gtf, construct_peak_gene_mapping
 
-__all__ = ["DIAGVI", "DIAGVAE", "DiagTrainingPlan"]
+__all__ = [
+    "DIAGVI",
+    "DIAGVAE",
+    "DiagTrainingPlan",
+    "add_gene_coords_from_gtf",
+    "construct_peak_gene_mapping",
+]

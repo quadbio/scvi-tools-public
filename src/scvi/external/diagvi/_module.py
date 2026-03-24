@@ -16,6 +16,7 @@ from scvi.distributions import (
     NegativeBinomial,
     NegativeBinomialMixture,
     Normal,
+    Poisson,
     ZeroInflatedGamma,
     ZeroInflatedLogNormal,
     ZeroInflatedNegativeBinomial,
@@ -39,6 +40,7 @@ LIKELIHOOD_TO_DECODER = {
     # Single-pathway likelihoods (unimodal distributions)
     "nb": DecoderSinglePathway,
     "zinb": DecoderSinglePathway,
+    "poisson": DecoderSinglePathway,
     "normal": DecoderSinglePathway,
     "log1pnormal": DecoderSinglePathway,
     "ziln": DecoderSinglePathway,
@@ -48,7 +50,7 @@ LIKELIHOOD_TO_DECODER = {
 }
 
 # Likelihoods that require softmax normalization (count data)
-NORMALIZE_LIKELIHOODS = {"nb", "zinb", "nbmixture"}
+NORMALIZE_LIKELIHOODS = {"nb", "zinb", "nbmixture", "poisson"}
 NON_NORMALIZE_LIKELIHOODS = {"log1pnormal", "ziln", "zig"}
 OTHER_LIKELIHOODS = {"normal"}
 
@@ -139,6 +141,10 @@ class DIAGVAE(BaseModuleClass):
                 self.gmm_means[name] = nn.Parameter(torch.randn(k, n_latent))
                 self.gmm_scales[name] = nn.Parameter(torch.zeros(k, n_latent))
 
+        # sparse data requires layer normalization
+        sparse_data_0 = modality_likelihoods[self.input_names[0]] == "poisson"
+        sparse_data_1 = modality_likelihoods[self.input_names[1]] == "poisson"
+
         # Encoders
         self.encoder_0 = Encoder(
             n_input=n_inputs[self.input_names[0]],
@@ -147,6 +153,9 @@ class DIAGVAE(BaseModuleClass):
             n_layers=n_layers,
             dropout_rate=dropout_rate,
             return_dist=True,
+            use_batch_norm=not sparse_data_0,
+            use_layer_norm=sparse_data_0,
+            activation_fn=torch.nn.LeakyReLU if sparse_data_0 else torch.nn.ReLU,
         )
 
         self.encoder_1 = Encoder(
@@ -156,6 +165,9 @@ class DIAGVAE(BaseModuleClass):
             n_layers=n_layers,
             dropout_rate=dropout_rate,
             return_dist=True,
+            use_batch_norm=not sparse_data_1,
+            use_layer_norm=sparse_data_1,
+            activation_fn=torch.nn.LeakyReLU if sparse_data_1 else torch.nn.ReLU,
         )
 
         # Decoders - selected based on likelihood function
@@ -393,6 +405,9 @@ class DIAGVAE(BaseModuleClass):
                 zi_logits=px_dropout,
                 scale=px_scale,
             )
+        elif self.modality_likelihoods[mode] == "poisson":
+            # Poisson likelihood for scATAC fragment counts
+            px = Poisson(rate=px_rate, scale=px_scale)
         else:
             raise ValueError(
                 f"Unknown likelihood '{self.modality_likelihoods[mode]}' for modality '{mode}'. "

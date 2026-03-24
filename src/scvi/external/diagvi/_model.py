@@ -320,7 +320,7 @@ class DIAGVI(BaseModelClass, VAEMixin):
         batch_key: str | None = None,
         labels_key: str | None = None,
         likelihood: Literal[
-            "nb", "zinb", "nbmixture", "normal", "log1pnormal", "ziln", "zig"
+            "nb", "zinb", "nbmixture", "normal", "log1pnormal", "ziln", "zig", "poisson"
         ] = "nb",
         normalize_lib: bool = True,
         gmm_prior: bool = False,
@@ -347,6 +347,7 @@ class DIAGVI(BaseModelClass, VAEMixin):
             - 'log1pnormal' : Log1p Normal distribution
             - 'ziln' : Zero-Inflated Log Normal distribution
             - 'zig' : Zero-Inflated Gamma distribution
+            - 'poisson' : Poisson distribution (for scATAC fragment counts)
         normalize_lib
             Whether to normalize counts with library size in the model.
         gmm_prior
@@ -417,9 +418,15 @@ class DIAGVI(BaseModelClass, VAEMixin):
                 REGISTRY_KEYS.LABELS_KEY, labels_key, unlabeled_category
             )
 
-        is_count_data = likelihood in {"nb", "zinb", "nbmixture"}
+        is_count_data = likelihood in {"nb", "zinb", "nbmixture", "poisson"}
+        check_fragment_counts = likelihood == "poisson"
         anndata_fields = [
-            LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=is_count_data),
+            LayerField(
+                REGISTRY_KEYS.X_KEY,
+                layer,
+                is_count_data=is_count_data,
+                check_fragment_counts=check_fragment_counts,
+            ),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             label_field,
         ]
@@ -435,7 +442,8 @@ class DIAGVI(BaseModelClass, VAEMixin):
         batch_key: dict[str, str] | str | None = None,
         labels_key: dict[str, str] | str | None = None,
         layer: dict[str, str | None] | str | None = None,
-        likelihood: dict[str, Literal["nb", "zinb", "nbmixture", "normal"]] | str = "nb",
+        likelihood: dict[str, Literal["nb", "zinb", "nbmixture", "normal", "poisson"]]
+        | str = "nb",
         normalize_lib: dict[str, bool] | bool = True,
         gmm_prior: dict[str, bool] | bool = False,
         n_mixture_components: dict[str, int] | int = 10,
@@ -507,6 +515,59 @@ class DIAGVI(BaseModelClass, VAEMixin):
                 unlabeled_category=unlabeled_category_mod,
                 **kwargs,
             )
+
+    @staticmethod
+    def add_gene_coords_from_gtf(
+        adata: AnnData,
+        gtf_path: str,
+        gtf_key: str = "gene_name",
+        var_key: str | None = None,
+    ) -> AnnData:
+        """Add genomic coordinates from GTF file to adata.var.
+
+        This is a convenience method for adding gene coordinates needed
+        for genomic guidance graph construction.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to annotate (typically RNA data).
+        gtf_path
+            Path to GTF file (supports .gz compression).
+        gtf_key
+            GTF attribute to match against var (default: "gene_name").
+            Use "gene_id" for Ensembl IDs.
+        var_key
+            Column in adata.var to match. If None, uses var_names.
+
+        Returns
+        -------
+        AnnData with chrom, chromStart, chromEnd, strand added to var.
+
+        Examples
+        --------
+        >>> DIAGVI.add_gene_coords_from_gtf(rna_adata, "gencode.vM25.gtf.gz")
+        >>> mapping = construct_peak_gene_mapping(rna_adata, atac_adata)
+        """
+        from ._utils import add_gene_coords_from_gtf
+
+        return add_gene_coords_from_gtf(adata, gtf_path, gtf_key, var_key)
+
+    @staticmethod
+    def construct_peak_gene_mapping(
+        rna_adata: AnnData,
+        atac_adata: AnnData,
+        gene_region: str = "auto",
+        promoter_len: int = 2000,
+        extend_range: int = 150000,
+        rna_key: str = "rna",
+        atac_key: str = "atac",
+    ):
+        from ._utils import construct_peak_gene_mapping
+
+        return construct_peak_gene_mapping(
+            rna_adata, atac_adata, gene_region, promoter_len, extend_range, rna_key, atac_key
+        )
 
     @staticmethod
     @dependencies("torch_geometric")
