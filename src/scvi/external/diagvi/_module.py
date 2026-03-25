@@ -340,8 +340,8 @@ class DIAGVAE(BaseModuleClass):
             v_all = graph_embeddings["v_all"]
             mu_all = graph_embeddings["mu_all"]
             logvar_all = graph_embeddings["logvar_all"]
+        # fallback for helper functions that call inference() without pre-computed graph embeddings
         else:
-            # Fallback: compute graph embeddings (for backward compatibility)
             if self._graph_device != device:
                 self.guidance_graph = self.guidance_graph.to(device)
                 self._graph_device = device

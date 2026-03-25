@@ -452,7 +452,18 @@ def propagate_highly_variable(
         atac_hvp_mask = atac_adata.var["highly_variable"].values
         atac_adata._inplace_subset_var(atac_hvp_mask)
 
-        logger.info(f"Subsetted adatas in place: RNA ({n_hvg} HVGs), ATAC ({n_hvp} HV peaks).")
+        # Subset mapping_df in place to only keep valid mappings
+        valid_rna = set(rna_adata.var_names)
+        valid_atac = set(atac_adata.var_names)
+        invalid_mask = ~(
+            mapping_df[rna_key].isin(valid_rna) & mapping_df[atac_key].isin(valid_atac)
+        )
+        mapping_df.drop(mapping_df.index[invalid_mask], inplace=True)
+
+        logger.info(
+            f"Subsetted adatas in place: RNA ({n_hvg} HVGs), ATAC ({n_hvp} HV peaks). "
+            f"Mapping reduced to {len(mapping_df)} pairs."
+        )
 
 
 @dependencies("torch_geometric")
