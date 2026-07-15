@@ -18,6 +18,8 @@ from scvi.utils import dependencies
 if TYPE_CHECKING:
     from typing import Literal
 
+    from scvi.external.diagvi._reweighting import OTClassBalancer
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +122,11 @@ class DiagTrainingPlan(TrainingPlan):
         Whether to log individual train loss components.
     log_val
         Whether to log individual validation loss components.
+    ot_class_balancer
+        Optional :class:`~scvi.external.diagvi._reweighting.OTClassBalancer` supplying per-cell
+        masses for the Sinkhorn term, so that the two modalities' minibatch marginals agree on
+        shared cell types. If ``None``, all cells carry uniform mass. Only the Sinkhorn term is
+        affected; the reconstruction and graph losses always use the natural composition.
     *args
         Additional positional arguments passed to :class:`~scvi.train.TrainingPlan`.
     **kwargs
@@ -144,6 +151,7 @@ class DiagTrainingPlan(TrainingPlan):
         loss_annealing: bool = False,
         log_train: bool = True,
         log_val: bool = False,
+        ot_class_balancer: OTClassBalancer | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -169,6 +177,7 @@ class DiagTrainingPlan(TrainingPlan):
         self.loss_annealing = loss_annealing
         self.log_train = log_train
         self.log_val = log_val
+        self.ot_class_balancer = ot_class_balancer
 
         # Initial values for annealing (10x larger for smoother optimization start)
         self.init_blur = 10 * self.sinkhorn_blur if self.sinkhorn_blur is not None else None
@@ -261,6 +270,10 @@ class DiagTrainingPlan(TrainingPlan):
                     "modality_loss": loss_output.loss,
                     "graph_v": loss_output.extra_metrics["v_all"],
                     "classification_loss": loss_output.extra_metrics["classification_loss"],
+                    # Carried alongside `z` so optimal-transport masses are built from the
+                    # labels of the same modality and minibatch that produced it.
+                    "mode": name,
+                    "labels": tensors[REGISTRY_KEYS.LABELS_KEY],
                 }
             )
 
@@ -312,12 +325,18 @@ class DiagTrainingPlan(TrainingPlan):
 
     @dependencies("geomloss")
     def _compute_sinkhorn_loss(
-        self, z1: torch.Tensor, z2: torch.Tensor, use_annealing: bool = False
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        use_annealing: bool = False,
+        a: torch.Tensor | None = None,
+        b: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute Sinkhorn (Unbalanced Optimal Transport) loss between latent spaces.
 
         Sinkhorn parameters (blur and reach) can be adaptively computed from the cost matrix
-        using OTT-JAX style heuristics or set to fixed values with optional annealing.
+        using OTT-JAX style heuristics or set to fixed values with optional annealing. They are
+        derived from the latent geometry and are therefore unaffected by ``a`` and ``b``.
 
         Parameters
         ----------
@@ -328,6 +347,11 @@ class DiagTrainingPlan(TrainingPlan):
         use_annealing
             Whether to use annealed Sinkhorn parameters. Only applied when both
             sinkhorn_blur and sinkhorn_reach are explicitly specified.
+        a
+            Optional per-cell masses for ``z1``, shape (n_cells,). If ``a`` or ``b`` is
+            ``None``, both point clouds carry uniform mass.
+        b
+            Optional per-cell masses for ``z2``, shape (n_cells,).
 
         Returns
         -------
@@ -390,7 +414,9 @@ class DiagTrainingPlan(TrainingPlan):
             blur=self.current_blur,
             reach=self.current_reach,
         )
-        return sinkhorn(z1, z2)
+        if a is None or b is None:
+            return sinkhorn(z1, z2)
+        return sinkhorn(a, z1, b, z2)
 
     def _compute_total_loss(
         self,
@@ -434,8 +460,15 @@ class DiagTrainingPlan(TrainingPlan):
             self.log("class_loss", classification_loss, batch_size=total_batch_size, on_epoch=True)
 
         # 4. Sinkhorn (UOT) loss
-        z1, z2 = loss_outputs[0]["z"], loss_outputs[1]["z"]
-        sinkhorn_loss = self._compute_sinkhorn_loss(z1, z2, use_annealing=use_annealing)
+        out1, out2 = loss_outputs[0], loss_outputs[1]
+        z1, z2 = out1["z"], out2["z"]
+        # Class-balanced masses make the two marginals agree on shared cell types, so the
+        # transport is not forced across cell-type boundaries by a proportion mismatch.
+        a = b = None
+        if self.ot_class_balancer is not None:
+            a = self.ot_class_balancer.masses(out1["labels"], out1["mode"], z1.device, z1.dtype)
+            b = self.ot_class_balancer.masses(out2["labels"], out2["mode"], z2.device, z2.dtype)
+        sinkhorn_loss = self._compute_sinkhorn_loss(z1, z2, use_annealing=use_annealing, a=a, b=b)
         if log:
             self.log("uot_loss", sinkhorn_loss, batch_size=total_batch_size, on_epoch=True)
 

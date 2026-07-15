@@ -1676,3 +1676,204 @@ def test_predict_celltype_no_classifier_error(trained_model):
     # This model was trained without labels_key, so no classifier exists
     with pytest.raises(ValueError, match="No classifier was trained"):
         model.predict_celltype(labeled_modality="diss")
+
+
+# =============================================================================
+# Class-balanced alignment (optimal-transport mass reweighting)
+# =============================================================================
+
+# Deterministic per-class counts. With n_min=20, "celltype_rare" (5 cells in diss) and
+# "celltype_other" (absent from diss) are excluded, leaving A and B as the shared classes.
+DISS_COUNTS = {"celltype_A": 100, "celltype_B": 50, "celltype_rare": 5}
+SPATIAL_COUNTS = {"celltype_A": 20, "celltype_B": 80, "celltype_other": 40}
+
+
+def _adata_with_exact_label_counts(counts, seed):
+    """AnnData whose cell-type labels have exactly the requested per-class counts."""
+    rng = np.random.default_rng(seed)
+    labels = np.concatenate([np.repeat(name, n) for name, n in counts.items()])
+    n_obs = int(labels.shape[0])
+    obs = pd.DataFrame(
+        {
+            "batch": pd.Categorical(np.repeat("batch1", n_obs)),
+            "cell_type": pd.Categorical(labels),
+        }
+    )
+    var = pd.DataFrame(index=[f"gene{i}" for i in range(N_VARS)])
+    return AnnData(X=rng.poisson(1.0, size=(n_obs, N_VARS)), obs=obs, var=var)
+
+
+def _setup_balanced_adatas():
+    """Two registered modalities with known, deliberately mismatched compositions."""
+    diss = _adata_with_exact_label_counts(DISS_COUNTS, seed=0)
+    spatial = _adata_with_exact_label_counts(SPATIAL_COUNTS, seed=1)
+    DIAGVI.setup_anndata(diss, batch_key="batch", labels_key="cell_type", likelihood="nb")
+    DIAGVI.setup_anndata(spatial, batch_key="batch", labels_key="cell_type", likelihood="nb")
+    return diss, spatial
+
+
+@pytest.fixture
+def balanced_managers():
+    """AnnDataManagers only: the balancer needs no model, so these tests stay lightweight."""
+    diss, spatial = _setup_balanced_adatas()
+    managers = {
+        "diss": DIAGVI._get_most_recent_anndata_manager(diss, required=True),
+        "spatial": DIAGVI._get_most_recent_anndata_manager(spatial, required=True),
+    }
+    return managers, ["diss", "spatial"]
+
+
+@pytest.fixture
+def balanced_model():
+    """Full DIAGVI model over the same two mismatched modalities."""
+    diss, spatial = _setup_balanced_adatas()
+    return DIAGVI({"diss": diss, "spatial": spatial})
+
+
+def _label_codes(managers, mode):
+    from scvi import REGISTRY_KEYS
+
+    manager = managers[mode]
+    codes = np.asarray(manager.get_from_registry(REGISTRY_KEYS.LABELS_KEY)).ravel()
+    state_registry = manager.get_state_registry(REGISTRY_KEYS.LABELS_KEY)
+    mapping = np.asarray(state_registry["categorical_mapping"])
+    return codes, mapping
+
+
+def test_ot_class_balancer_shared_set_and_phi(balanced_managers):
+    """Shared classes respect n_min and must exist in both modalities."""
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    balancer = build_ot_class_balancer(managers, names, n_min=20)
+
+    assert balancer is not None
+    # celltype_rare has 5 cells in diss (< n_min); celltype_other is absent from diss.
+    assert balancer.shared_classes == ["celltype_A", "celltype_B"]
+    assert balancer.phi["diss"] == pytest.approx(150 / 155)
+    assert balancer.phi["spatial"] == pytest.approx(100 / 140)
+    assert balancer.reference.sum() == pytest.approx(1.0)
+
+
+def test_ot_class_balancer_marginals_agree(balanced_managers):
+    """The point of the scheme: both reweighted compositions equal the consensus reference."""
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    balancer = build_ot_class_balancer(managers, names, n_min=20)
+
+    # The two modalities start out grossly mismatched (~66/34 vs ~21/79).
+    assert not np.allclose(balancer.compositions["diss"], balancer.compositions["spatial"])
+
+    for mode in names:
+        effective = balancer.compositions[mode] * balancer.shared_weights[mode]
+        # Reweighted composition matches the reference -> the two modalities agree.
+        np.testing.assert_allclose(effective, balancer.reference, rtol=1e-10)
+        # Which also makes the weights mean-one over the shared block.
+        assert float(effective.sum()) == pytest.approx(1.0)
+
+    # The reference preserves relative abundance rather than flattening to uniform.
+    assert balancer.reference[0] != pytest.approx(balancer.reference[1])
+
+
+def test_ot_class_balancer_masses_anchor_shared_block(balanced_managers):
+    """Feeding a modality's full data as one batch puts ~unit mass on the shared block."""
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    balancer = build_ot_class_balancer(managers, names, n_min=20)
+
+    for mode in names:
+        codes, mapping = _label_codes(managers, mode)
+        masses = balancer.masses(torch.as_tensor(codes), mode, torch.device("cpu"), torch.float32)
+
+        assert masses.ndim == 1
+        assert masses.shape[0] == codes.shape[0]
+        assert torch.all(masses > 0)
+
+        shared = torch.as_tensor(np.isin(mapping[codes], balancer.shared_classes))
+        assert float(masses[shared].sum()) == pytest.approx(1.0, rel=0.02)
+        # Non-shared cells carry natural mass (v=1) on top of the anchored shared block.
+        expected_natural = 1.0 / (codes.shape[0] * balancer.phi[mode])
+        assert torch.allclose(
+            masses[~shared], torch.full_like(masses[~shared], expected_natural), atol=1e-6
+        )
+
+
+def test_ot_class_balancer_masses_dtype_device_and_ravel(balanced_managers):
+    """Masses honour the requested dtype and accept (B, 1) label tensors."""
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    balancer = build_ot_class_balancer(managers, names, n_min=20)
+    labels = torch.tensor([[0], [1], [0]])
+    masses = balancer.masses(labels, "diss", torch.device("cpu"), torch.float64)
+
+    assert masses.dtype == torch.float64
+    assert masses.shape == (3,)
+    assert torch.all(masses > 0)
+
+
+def test_ot_class_balancer_no_shared_classes_returns_none(balanced_managers):
+    """An impossible n_min leaves no shared classes: warn and fall back to uniform masses."""
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    with pytest.warns(UserWarning, match="No cell types are shared"):
+        balancer = build_ot_class_balancer(managers, names, n_min=10_000)
+
+    assert balancer is None
+
+
+def test_ot_class_balancer_requires_two_modalities(balanced_managers):
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, _ = balanced_managers
+    with pytest.raises(ValueError, match="exactly two modalities"):
+        build_ot_class_balancer(managers, ["diss"])
+
+
+def test_ot_class_balancer_unknown_modality(balanced_managers):
+    from scvi.external.diagvi._reweighting import build_ot_class_balancer
+
+    managers, names = balanced_managers
+    balancer = build_ot_class_balancer(managers, names, n_min=20)
+    with pytest.raises(KeyError, match="Unknown modality"):
+        balancer.masses(torch.tensor([0, 1]), "not_a_modality")
+
+
+def test_train_balance_alignment_runs(balanced_model):
+    """Training with class-balanced alignment runs end to end."""
+    pytest.importorskip("geomloss")
+
+    balanced_model.train(max_epochs=1, batch_size=16, balance_alignment=True)
+
+    assert balanced_model.is_trained_ is True
+    assert balanced_model._training_plan.ot_class_balancer is not None
+
+
+def test_train_balance_alignment_default_off(balanced_model):
+    """By default no balancer is built, preserving the uniform-mass behaviour."""
+    pytest.importorskip("geomloss")
+
+    balanced_model.train(max_epochs=1, batch_size=16)
+
+    assert balanced_model._training_plan.ot_class_balancer is None
+
+
+def test_train_balance_alignment_changes_loss():
+    """Reweighting the alignment term actually changes the optimisation."""
+    pytest.importorskip("geomloss")
+
+    from scvi import settings
+
+    diss, spatial = _setup_balanced_adatas()
+
+    losses = {}
+    for balance in (False, True):
+        settings.seed = 0
+        model = DIAGVI({"diss": diss, "spatial": spatial})
+        model.train(max_epochs=2, batch_size=16, balance_alignment=balance)
+        losses[balance] = model.history_["training_loss"].to_numpy(dtype=float).ravel()
+
+    assert not np.allclose(losses[False], losses[True])

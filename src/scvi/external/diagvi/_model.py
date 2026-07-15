@@ -17,6 +17,7 @@ from scvi.data import AnnDataManager
 from scvi.data._constants import _MODEL_NAME_KEY, _SETUP_ARGS_KEY
 from scvi.data.fields import CategoricalObsField, LabelsWithUnlabeledObsField, LayerField
 from scvi.dataloaders import DataSplitter
+from scvi.external.diagvi._reweighting import build_ot_class_balancer as _build_ot_class_balancer
 from scvi.external.diagvi._utils import (
     _check_guidance_graph_consistency,
     _construct_guidance_graph,
@@ -188,6 +189,8 @@ class DIAGVI(BaseModelClass, VAEMixin):
         shuffle_set_split: bool = True,
         datasplitter_kwargs: dict | None = None,
         plan_kwargs: dict | None = None,
+        balance_alignment: bool = False,
+        balance_kwargs: dict | None = None,
         **kwargs,
     ):
         """Train the DIAGVI model.
@@ -214,6 +217,20 @@ class DIAGVI(BaseModelClass, VAEMixin):
               e.g., ``{"rna": {"external_indexing": [train, val, test]}, "protein": {...}}``
         plan_kwargs
             Additional keyword arguments for the training plan.
+        balance_alignment
+            Whether to class-balance the alignment (Sinkhorn) term. When ``True``, cells are
+            given optimal-transport masses that make the two modalities' minibatch marginals
+            agree on their shared cell types, which prevents rare shared types from being
+            smeared onto abundant ones when the modalities have very different cell-type
+            proportions. Requires both modalities to have been set up with a ``labels_key``
+            whose categories overlap. Only the alignment term is affected; the reconstruction
+            and graph losses always use the natural composition.
+        balance_kwargs
+            Additional keyword arguments for
+            :func:`~scvi.external.diagvi._reweighting.build_ot_class_balancer`, used only when
+            ``balance_alignment`` is ``True``. Supports ``n_min`` (minimum cells per class in
+            each modality for it to count as shared, default 20) and ``kappa`` (cap on the
+            per-class weight, default 10.0).
         **kwargs
             Additional keyword arguments for the Trainer.
         """
@@ -302,6 +319,13 @@ class DIAGVI(BaseModelClass, VAEMixin):
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         update_dict = {"lr": lr}
         plan_kwargs.update(update_dict)
+        if balance_alignment:
+            # Returns None if no shared cell types qualify, which falls back to uniform masses.
+            plan_kwargs["ot_class_balancer"] = _build_ot_class_balancer(
+                self.adata_managers,
+                self.input_names,
+                **(balance_kwargs if isinstance(balance_kwargs, dict) else {}),
+            )
         self._training_plan = self._training_plan_cls(
             self.module,
             **plan_kwargs,
